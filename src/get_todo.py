@@ -1,4 +1,4 @@
-﻿from utils import table, response
+from utils import table, response
 
 def handler(event, context):
     todo_id = event["pathParameters"]["id"]

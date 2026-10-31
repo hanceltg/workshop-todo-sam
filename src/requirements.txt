@@ -1,1 +1,1 @@
-﻿# boto3 ya viene incluido en el runtime de Lambda
+# boto3 ya viene incluido en el runtime de Lambda

@@ -1,6 +1,6 @@
-﻿import uuid
+import uuid
 from datetime import datetime, timezone
-from utils import table, response, parse_body
+from utils import table, response, parse_body, publish_event
 
 def handler(event, context):
     data = parse_body(event)
@@ -20,4 +20,5 @@ def handler(event, context):
         "updatedAt": now,
     }
     table.put_item(Item=item)
+    publish_event("todo.created", item)
     return response(201, item)

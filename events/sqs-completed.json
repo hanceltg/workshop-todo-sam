@@ -1,0 +1,10 @@
+{
+  "Records": [
+    {
+      "messageId": "local-1",
+      "body": "{\"eventId\":\"local-evt-1\",\"eventType\":\"todo.completed\",\"occurredAt\":\"2026-10-26T12:00:00Z\",\"source\":\"local\",\"data\":{\"id\":\"local-todo\",\"title\":\"Probar consumidor en local\",\"completed\":true}}",
+      "attributes": { "ApproximateReceiveCount": "1" },
+      "eventSource": "aws:sqs"
+    }
+  ]
+}

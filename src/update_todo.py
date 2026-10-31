@@ -1,5 +1,5 @@
-﻿from datetime import datetime, timezone
-from utils import table, response, parse_body
+from datetime import datetime, timezone
+from utils import table, response, parse_body, publish_event
 
 def handler(event, context):
     todo_id = event["pathParameters"]["id"]
@@ -7,6 +7,7 @@ def handler(event, context):
     if data is None:
         return response(400, {"message": "El body debe ser JSON válido"})
 
+    # Construimos el UpdateExpression solo con los campos enviados
     sets = ["updatedAt = :u"]
     values = {":u": datetime.now(timezone.utc).isoformat()}
     names = {}
@@ -43,4 +44,8 @@ def handler(event, context):
     except table.meta.client.exceptions.ConditionalCheckFailedException:
         return response(404, {"message": f"TODO {todo_id} no existe"})
 
-    return response(200, result["Attributes"])
+    todo = result["Attributes"]
+    # Evento más específico si el TODO se marcó como completado
+    event_type = "todo.completed" if data.get("completed") is True else "todo.updated"
+    publish_event(event_type, todo)
+    return response(200, todo)

@@ -1,6 +1,6 @@
 # Workshop: CRUD de TODOs con AWS SAM (Python)
 
-**Autor:** Hance L. · **Curso:** Programación Agéntica
+**Autor:** Hance trujillo. · **Curso:** Programación Agéntica
 
 API REST serverless para gestionar una lista de tareas, definida 100% como código con AWS SAM y desplegada en mi propia cuenta de AWS.
 
@@ -119,3 +119,126 @@ _(Opcional: describir aquí el reto que se resuelva, por ejemplo filtro por esta
 - [ ] Capturas de los errores 400 y 404
 - [ ] Captura de los logs de CloudWatch
 - [ ] Captura de `sam delete` completado
+
+---
+
+# Parte 2: Microservicios con SNS y SQS
+
+**Autor:** _(tu nombre completo)_ Â· **Rama:** `parte-2` Â· **Stack:** `todo-sam-hance` (`us-east-2`)
+
+La API de la Parte 1 sigue respondiendo igual, pero ahora cada escritura exitosa (crear, actualizar, completar, borrar) publica un **evento de dominio** en un topic de Amazon SNS. Cada microservicio interesado se suscribe con su propia cola de Amazon SQS y procesa los eventos a su ritmo, sin que la API sepa que existe.
+
+## Arquitectura
+
+```mermaid
+flowchart LR
+  C[Cliente] --> G[API Gateway dev]
+  G --> L[5 Lambdas CRUD]
+  L --> T[(TodosTable)]
+  L -- publica evento --> S{{SNS TodoEventsTopic}}
+  S -- todos los eventos --> QA[SQS AuditQueue]
+  S -- filtro todo.completed --> QN[SQS NotificationsQueue]
+  QA --> FA[AuditFunction]
+  FA --> AT[(AuditTable)]
+  QA -. 3 fallos .-> DA[AuditDLQ]
+  QN --> FN[NotifyFunction]
+  QN -. 3 fallos .-> DN[NotificationsDLQ]
+  G --> H[GetHistoryFunction]
+  H --> AT
+```
+
+| Evento | Lo publica | Lo reciben |
+|---|---|---|
+| `todo.created` | `CreateTodoFunction` | Audit |
+| `todo.updated` | `UpdateTodoFunction` | Audit |
+| `todo.completed` | `UpdateTodoFunction` | Audit y Notify |
+| `todo.deleted` | `DeleteTodoFunction` | Audit |
+
+Ruta nueva: `GET /todos/{id}/history` devuelve el historial de eventos de un TODO, y sobrevive al borrado del TODO.
+
+## QuÃ© cambiÃ³ respecto a la Parte 1
+
+- `template.yaml`: topic SNS, 2 colas SQS con sus DLQ, polÃ­tica de cola, suscripciones (una con `FilterPolicy`), `AuditTable` y 3 funciones nuevas.
+- `utils.py`: funciÃ³n `publish_event`. `create_todo.py`, `update_todo.py` y `delete_todo.py`: publican despuÃ©s de escribir con Ã©xito.
+- Nuevos: `audit_consumer.py`, `notify_consumer.py`, `get_history.py`.
+- Sin cambios: `list_todos.py`, `get_todo.py` y el contrato de las 5 rutas originales.
+
+## Evidencias
+
+### Change set y Outputs del deploy
+
+![Change set](capturas-parte2/p2-01-changeset.png)
+![Outputs](capturas-parte2/p2-01-outputs.png)
+
+### Historial de un TODO (3 eventos, incluido `todo.completed`)
+
+![Historial](capturas-parte2/p2-02-history.png)
+
+### Logs de Audit y Notify: el filtro en acciÃ³n
+
+Con las mismas tres operaciones (crear, editar, completar), `AuditFunction` registrÃ³ **3 eventos** y `NotifyFunction` solo **1**, porque la `FilterPolicy` de SNS descartÃ³ `todo.created` y `todo.updated` antes de que llegaran a su cola.
+
+![Logs](capturas-parte2/p2-03-logs-audit-notify.png)
+
+### Mensaje venenoso (`#fail`): reintentos y DLQ
+
+Un TODO con `#fail` en el tÃ­tulo hace fallar a `NotifyFunction` siempre. La API respondiÃ³ `200` (el fallo ocurre en otro microservicio) y `AuditFunction` procesÃ³ el mismo evento sin problema. SQS reintentÃ³ 3 veces y luego moviÃ³ el mensaje a la DLQ.
+
+![Tres intentos](capturas-parte2/p2-04-fail-3-intentos.png)
+![DLQ con 1 mensaje](capturas-parte2/p2-05-dlq-1-mensaje.png)
+
+### Redrive
+
+ComentÃ© las dos lÃ­neas del `#fail` en `notify_consumer.py`, despleguÃ© con `sam build; sam deploy` y devolvÃ­ el mensaje a su cola original con `aws sqs start-message-move-task`. `NotifyFunction` lo procesÃ³ con Ã©xito.
+
+![Redrive](capturas-parte2/p2-06-redrive.png)
+
+### Limpieza
+
+![sam delete](capturas-parte2/p2-07-sam-delete.png)
+
+## QuÃ© aprendÃ­
+
+- **Desacoplamiento real:** agregar un consumidor nuevo no exige tocar el cÃ³digo del CRUD, solo el template y una funciÃ³n nueva.
+- **Fan-out y filtros:** un solo `sns.publish` alimenta varias colas, y la `FilterPolicy` evalÃºa el atributo `eventType` sin abrir el cuerpo del mensaje.
+- **Aislamiento de fallos:** el mensaje `#fail` rompiÃ³ a `NotifyFunction` pero no a `AuditFunction`, porque cada consumidor tiene su cola, su ritmo, sus reintentos y su DLQ.
+- **Fallos parciales:** devolver `batchItemFailures` reintenta solo los mensajes que fallaron; lanzar una excepciÃ³n reencolarÃ­a el lote completo.
+- **Arranque en frÃ­o:** en los logs, la primera invocaciÃ³n de `AuditFunction` tardÃ³ unos 285 ms (con 509 ms de inicializaciÃ³n); las siguientes, 40 ms y 17 ms.
+- **Un detalle del deploy:** al corregir solo `notify_consumer.py`, el change set marcÃ³ `Modify` en las **8** funciones, no solo en `NotifyFunction`. Las ocho comparten `CodeUri: src/`, asÃ­ que cualquier cambio en esa carpeta cambia el paquete de todas.
+- **`ApproximateReceiveCount: 4`** en la DLQ: 3 intentos de la Lambda mÃ¡s la lectura manual que hice con `receive-message`.
+- **Credenciales temporales:** la sesiÃ³n de `aws login` caducÃ³ a mitad de la prÃ¡ctica y bastÃ³ repetir `aws login` para continuar sin perder nada de lo desplegado.
+
+## Preguntas de repaso
+
+**1. Â¿QuÃ© diferencia hay entre SNS y SQS? Â¿Por quÃ© se usan juntos?**
+SNS es publicaciÃ³n/suscripciÃ³n: un productor publica una vez y SNS empuja una copia a todos los suscriptores. SQS es una cola: guarda los mensajes hasta que un consumidor los lee, con buffer, reintentos y DLQ. Juntos dan *fan-out con buffer*: un evento llega a varios consumidores, y cada uno lo procesa a su ritmo y con sus propios reintentos.
+
+**2. Si maÃ±ana se agrega un microservicio de estadÃ­sticas, Â¿quÃ© archivos del CRUD hay que modificar?**
+Ninguno. Los productores publican en el topic sin saber quiÃ©n escucha. Solo cambia `template.yaml` (una cola nueva con su DLQ, su suscripciÃ³n, el permiso de la cola en `EventsQueuesPolicy` y la funciÃ³n consumidora) y se aÃ±ade el cÃ³digo del nuevo consumidor.
+
+**3. Un lote trae 10 mensajes y falla 1. Â¿QuÃ© pasa si el handler devuelve `batchItemFailures`? Â¿Y si lanza una excepciÃ³n?**
+Con `batchItemFailures`, los 9 mensajes buenos se borran de la cola y solo el que fallÃ³ vuelve a ser visible para reintentarse. Si el handler lanza una excepciÃ³n, falla el lote completo y los 10 mensajes se reintentan, incluidos los 9 ya procesados, que se duplican. Por eso conviene capturar los errores mensaje por mensaje y diseÃ±ar consumidores idempotentes.
+
+**4. Â¿Por quÃ© la `sk` de `AuditTable` incluye el `eventId`? Â¿QuÃ© problema evita?**
+La `sk` es `occurredAt#eventId`. El `occurredAt` da el orden cronolÃ³gico, y el `eventId` evita que dos eventos del mismo TODO con el mismo instante se sobrescriban entre sÃ­. AdemÃ¡s es determinista: si SQS entrega el mismo mensaje dos veces, se escribe la misma clave y el segundo `put_item` sobrescribe el Ã­tem en lugar de duplicarlo. Eso hace al consumidor idempotente.
+
+**5. Â¿Por quÃ© el `VisibilityTimeout` de la cola debe ser mayor que el `Timeout` de la Lambda?**
+Mientras una Lambda procesa un mensaje, este queda invisible durante el `VisibilityTimeout`. Si ese tiempo fuera menor que lo que tarda la funciÃ³n, el mensaje volverÃ­a a ser visible mientras aÃºn se procesa y otra invocaciÃ³n lo tomarÃ­a, duplicando el trabajo. AWS recomienda al menos 6 veces el `Timeout` de la funciÃ³n (aquÃ­ 60 s frente a 10 s).
+
+**6. El mensaje `#fail` lo procesÃ³ bien `AuditFunction` pero no `NotifyFunction`. Â¿QuÃ© propiedad de la arquitectura demuestra eso?**
+El **aislamiento de fallos** (desacoplamiento entre consumidores). Cada consumidor tiene su propia cola, sus reintentos y su DLQ, asÃ­ que el fallo de uno no afecta a los demÃ¡s ni a la API que publicÃ³ el evento.
+
+**7. Â¿QuÃ© riesgo tiene publicar en SNS despuÃ©s de escribir en DynamoDB, y cÃ³mo lo mitigarÃ­as?**
+Es una *doble escritura* sin transacciÃ³n comÃºn. Si el `PutItem` tiene Ã©xito y la publicaciÃ³n en SNS falla, el TODO existe pero el evento nunca sale, y el cliente recibe un error 502. Se mitiga con el patrÃ³n **outbox**: activar DynamoDB Streams en `TodosTable` y publicar los eventos desde una Lambda del stream (o con EventBridge Pipes), de modo que el evento se derive siempre del dato ya guardado.
+
+## Checklist de la Parte 2
+
+- [x] CÃ³digo completo: `template.yaml`, `src/` y `samconfig.toml`
+- [x] Change set y Outputs
+- [x] `GET /todos/{id}/history` con 3 eventos
+- [x] Logs de `AuditFunction` y `NotifyFunction` (filtro)
+- [x] Mensaje `#fail`: 3 intentos y DLQ con 1 mensaje
+- [x] Redrive exitoso
+- [x] `sam delete` completado
+- [x] README con diagrama y respuestas de repaso
+
